@@ -1,17 +1,18 @@
 import "dotenv/config";
 import express from "express";
-import { middleware, Client } from "@line/bot-sdk";
-import type { MiddlewareConfig, WebhookEvent } from "@line/bot-sdk";
 import nodemailer from "nodemailer";
+import crypto from "crypto";
+import fetch from "node-fetch";
 
 // 設定
-const config: MiddlewareConfig & { channelAccessToken: string } = {
-  channelSecret: process.env.LINE_CHANNEL_SECRET!,
-  channelAccessToken: process.env.LINE_ACCESS_TOKEN!,
-};
+const FB_PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN!;
+const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN!;
+const FB_APP_SECRET = process.env.FB_APP_SECRET!;
 
-// クライアントの初期化
-const lineClient = new Client(config);
+// Facebook Graph API URL
+const FB_GRAPH_API_URL = "https://graph.facebook.com/v21.0/me/messages";
+
+// メール送信設定
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -83,65 +84,153 @@ function extractAndValidatePhoneNumber(text: string): {
 
 // Expressサーバーの設定
 const app = express();
-app.get("/", (_req, res) => res.send("LINE PoC (receive-only) running"));
+app.use(express.json({ verify: verifyRequestSignature }));
 
-// Webhookエンドポイント
-app.post("/webhook", middleware(config), async (req: any, res) => {
-  console.log("Webhookイベントを受信:", JSON.stringify(req.body, null, 2));
-  const events: WebhookEvent[] = req.body.events || [];
-  for (const event of events) {
-    await handleEvent(event);
+app.get("/", (_req, res) => res.send("Facebook Messenger Bot running"));
+
+// Webhook検証エンドポイント（Facebook用）
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === FB_VERIFY_TOKEN) {
+    console.log("Webhook検証成功");
+    res.status(200).send(challenge);
+  } else {
+    console.log("Webhook検証失敗");
+    res.sendStatus(403);
   }
-  res.status(200).end();
 });
 
-// メッセージ処理
-async function handleEvent(event: WebhookEvent) {
-  console.log("イベント処理開始:", JSON.stringify(event, null, 2));
+// Webhookエンドポイント（メッセージ受信）
+app.post("/webhook", async (req, res) => {
+  console.log("Webhookイベントを受信:", JSON.stringify(req.body, null, 2));
+  
+  const body = req.body;
+  
+  if (body.object === "page") {
+    for (const entry of body.entry) {
+      const webhookEvent = entry.messaging?.[0];
+      if (webhookEvent) {
+        await handleEvent(webhookEvent);
+      }
+    }
+    res.status(200).send("EVENT_RECEIVED");
+  } else {
+    res.sendStatus(404);
+  }
+});
 
-  if (event.type !== "message" || event.message.type !== "text") {
-    console.log("テキストメッセージ以外のイベントをスキップ");
+// リクエスト署名の検証
+function verifyRequestSignature(req: any, res: any, buf: Buffer) {
+  const signature = req.headers["x-hub-signature-256"];
+  if (!signature) {
+    console.warn("署名ヘッダーがありません");
     return;
   }
 
-  const userId = event.source.userId || "";
-  const text = event.message.text;
-  const timestamp = new Date(event.timestamp).toISOString();
+  const elements = signature.split("=");
+  const signatureHash = elements[1];
+  const expectedHash = crypto
+    .createHmac("sha256", FB_APP_SECRET)
+    .update(buf)
+    .digest("hex");
 
-  console.log("メッセージを受信:", { userId, text, timestamp });
+  if (signatureHash !== expectedHash) {
+    throw new Error("リクエスト署名の検証に失敗しました");
+  }
+}
 
-  // メッセージを履歴に追加
-  if (!messageHistory.has(userId)) {
-    messageHistory.set(userId, []);
-  }
-  messageHistory.get(userId)?.push({ text, timestamp });
+// Facebook Messengerにメッセージを送信
+async function sendMessage(recipientId: string, message: any) {
+  try {
+    const response = await fetch(FB_GRAPH_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        recipient: { id: recipientId },
+        message: message,
+        access_token: FB_PAGE_ACCESS_TOKEN,
+      }),
+    });
 
-  // 承認応答の処理
-  if (text === "はい、大丈夫です") {
-    console.log("承認応答を受信:", { userId });
-    await handleApproval(userId);
+    const data = await response.json();
+    console.log("メッセージ送信成功:", data);
+    return data;
+  } catch (error) {
+    console.error("メッセージ送信エラー:", error);
+    throw error;
   }
-  // 承認拒否の処理
-  else if (text === "いいえ、結構です") {
-    console.log("承認拒否を受信:", { userId });
-    await handleRejection(userId);
+}
+
+// メッセージ処理
+async function handleEvent(event: any) {
+  console.log("イベント処理開始:", JSON.stringify(event, null, 2));
+
+  const senderId = event.sender?.id;
+  if (!senderId) {
+    console.log("送信者IDが見つかりません");
+    return;
   }
-  // 電話番号の処理
-  else {
-    const { isValid, number, hasInvalidChars } =
-      extractAndValidatePhoneNumber(text);
-    if (isValid && number) {
-      console.log("有効な電話番号を検出:", { userId, number });
-      await showConfirmation(userId);
-    } else if (hasInvalidChars) {
-      console.log("無効な電話番号フォーマットを検出:", {
-        userId,
-        text,
-        hasInvalidChars,
-      });
-      await handleInvalidPhoneNumber(userId);
-    } else {
-      console.log("通常のメッセージを受信:", { userId, text });
+
+  // メッセージイベントの処理
+  if (event.message) {
+    const text = event.message.text;
+    if (!text) {
+      console.log("テキストメッセージ以外をスキップ");
+      return;
+    }
+
+    const timestamp = new Date(event.timestamp).toISOString();
+    console.log("メッセージを受信:", { senderId, text, timestamp });
+
+    // メッセージを履歴に追加
+    if (!messageHistory.has(senderId)) {
+      messageHistory.set(senderId, []);
+    }
+    messageHistory.get(senderId)?.push({ text, timestamp });
+
+    // 承認応答の処理
+    if (text === "はい、大丈夫です") {
+      console.log("承認応答を受信:", { senderId });
+      await handleApproval(senderId);
+    }
+    // 承認拒否の処理
+    else if (text === "いいえ、結構です") {
+      console.log("承認拒否を受信:", { senderId });
+      await handleRejection(senderId);
+    }
+    // 電話番号の処理
+    else {
+      const { isValid, number, hasInvalidChars } =
+        extractAndValidatePhoneNumber(text);
+      if (isValid && number) {
+        console.log("有効な電話番号を検出:", { senderId, number });
+        await showConfirmation(senderId);
+      } else if (hasInvalidChars) {
+        console.log("無効な電話番号フォーマットを検出:", {
+          senderId,
+          text,
+          hasInvalidChars,
+        });
+        await handleInvalidPhoneNumber(senderId);
+      } else {
+        console.log("通常のメッセージを受信:", { senderId, text });
+      }
+    }
+  }
+  // ポストバックイベントの処理（Quick Replyからの応答）
+  else if (event.postback) {
+    const payload = event.postback.payload;
+    console.log("ポストバックを受信:", { senderId, payload });
+
+    if (payload === "APPROVE") {
+      await handleApproval(senderId);
+    } else if (payload === "REJECT") {
+      await handleRejection(senderId);
     }
   }
 }
@@ -172,15 +261,14 @@ async function handleApproval(userId: string) {
     await transporter.sendMail({
       from: process.env.GMAIL_USER,
       to: toAddresses,
-      subject: "LINE問い合わせ【AGAクリニック比較サイト】aga_line",
+      subject: "Facebook Messenger問い合わせ【AGAクリニック比較サイト】aga_facebook",
       text: formatMailBody(userId),
     });
 
     console.log("メール送信成功");
 
-    // LINEで返信
-    await lineClient.pushMessage(userId, {
-      type: "text",
+    // Facebook Messengerで返信
+    await sendMessage(userId, {
       text: "ありがとうございます。\n専門スタッフよりご連絡させていただきます。\nしばらくお待ちください。",
     });
 
@@ -200,101 +288,35 @@ async function showConfirmation(userId: string) {
   const timestamp = new Date().toISOString();
   pendingApprovals.set(userId, { text: "電話確認待ち", timestamp });
 
-  // Flexメッセージで確認メッセージを送信
-  await lineClient.pushMessage(userId, {
-    type: "flex",
-    altText: "お電話の確認",
-    contents: {
-      type: "bubble",
-      hero: {
-        type: "image",
-        url: "https://card-type-message.line-scdn.net/card-type-message-image-2025/615pknlz/1758084766925-ZVJy1VTRpibNyrARw3Ru45O9F30zTqUwhWEO6uM8q0J8yMWuHB",
-        size: "full",
-        aspectRatio: "1.51:1",
-        aspectMode: "cover",
+  // Quick Replyで確認メッセージを送信
+  await sendMessage(userId, {
+    text: "専門スタッフからご連絡\n\n最短当日または翌営業日、専門スタッフからご連絡してもよろしいでしょうか？",
+    quick_replies: [
+      {
+        content_type: "text",
+        title: "はい、大丈夫です",
+        payload: "APPROVE",
       },
-      body: {
-        type: "box",
-        layout: "vertical",
-        spacing: "xl",
-        contents: [
-          {
-            type: "text",
-            text: "専門スタッフからご連絡",
-            weight: "bold",
-            size: "xl",
-            align: "start",
-          },
-          {
-            type: "text",
-            text: "最短当日または翌営業日、専門スタッフからご連絡してもよろしいでしょうか？",
-            wrap: true,
-            align: "start",
-            margin: "md",
-          },
-          {
-            type: "box",
-            layout: "vertical",
-            spacing: "sm",
-            margin: "xxl",
-            contents: [
-              {
-                type: "box",
-                layout: "vertical",
-                action: {
-                  type: "message",
-                  label: "はい、大丈夫です",
-                  text: "はい、大丈夫です",
-                },
-                contents: [
-                  {
-                    type: "text",
-                    text: "はい、大丈夫です",
-                    color: "#4488ff",
-                    align: "center",
-                  },
-                ],
-                paddingAll: "md",
-              },
-              {
-                type: "box",
-                layout: "vertical",
-                action: {
-                  type: "message",
-                  label: "いいえ、結構です",
-                  text: "いいえ、結構です",
-                },
-                contents: [
-                  {
-                    type: "text",
-                    text: "いいえ、結構です",
-                    color: "#4488ff",
-                    align: "center",
-                  },
-                ],
-                paddingAll: "md",
-              },
-            ],
-          },
-        ],
-        paddingAll: "xl",
+      {
+        content_type: "text",
+        title: "いいえ、結構です",
+        payload: "REJECT",
       },
-    },
+    ],
   });
 }
 
 // 承認拒否時の処理
 async function handleRejection(userId: string) {
   // まずメッセージを送信
-  await lineClient.pushMessage(userId, {
-    type: "text",
+  await sendMessage(userId, {
     text: "承知いたしました！気になる点がありましたら、いつでもお気軽にお問合せください",
   });
 
   // 少し待ってから確認カードを再表示
   setTimeout(async () => {
     await showConfirmation(userId);
-  }, 1000); // 1秒後に表示
+  }, 1000);
 
   pendingApprovals.delete(userId);
 }
@@ -311,16 +333,14 @@ function formatMailBody(userId: string): string {
 
 // 無効な電話番号の処理
 async function handleInvalidPhoneNumber(userId: string) {
-  await lineClient.pushMessage(userId, {
-    type: "text",
+  await sendMessage(userId, {
     text: "申し訳ありません。電話番号の形式が正しくないようです。\n\n以下のような形式で電話番号を入力してください：\n・携帯電話の場合：090-1234-5678\n・固定電話の場合：03-1234-5678",
   });
 }
 
 // フォーマットガイドの表示
 async function handleFormatGuide(userId: string) {
-  await lineClient.pushMessage(userId, {
-    type: "text",
+  await sendMessage(userId, {
     text: "以下の形式で入力してください：\n\n【お名前】山田太郎\n【電話番号】090-1234-5678",
   });
 }

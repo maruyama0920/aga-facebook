@@ -1,14 +1,14 @@
-# LINE問い合わせシステム 仕様書
+# Facebook Messenger問い合わせシステム 仕様書
 
 ## 1. システム概要
 
-LINEを通じて問い合わせを受け付け、電話番号を含むメッセージを検出した場合に確認を行い、承認された場合はメールで通知するシステムです。
+Facebook Messengerを通じて問い合わせを受け付け、電話番号を含むメッセージを検出した場合に確認を行い、承認された場合はメールで通知するシステムです。
 
 ## 2. 基本機能
 
-1. メッセージの受信（LINE Webhook）
+1. メッセージの受信（Facebook Webhook）
 2. 電話番号の検出と検証
-3. 確認メッセージの表示（Flexメッセージ）
+3. 確認メッセージの表示（Quick Reply）
 4. メール通知（承認時）
 5. メッセージ履歴の管理
 
@@ -89,7 +89,7 @@ LINEを通じて問い合わせを受け付け、電話番号を含むメッセ�
 
 承認された場合、以下の形式でメールを送信：
 
-- 件名: `LINE問い合わせ【フレッツ光でグッドライフ】flets_line`
+- 件名: `Facebook Messenger問い合わせ【AGAクリニック比較サイト】aga_facebook`
 - 本文:
 
   ```
@@ -114,19 +114,20 @@ LINEを通じて問い合わせを受け付け、電話番号を含むメッセ�
 
 - Node.js/TypeScript
 - Express（Webサーバー）
-- @line/bot-sdk（LINE Messaging API）
+- Facebook Messenger Platform API
 - nodemailer（メール送信）
 - dotenv（環境変数管理）
 
 ### 4.2 環境変数
 
 ```
-LINE_CHANNEL_SECRET=【設定済み】
-LINE_ACCESS_TOKEN=【設定済み】
-PORT=3000
-GMAIL_USER=【設定済み】
-GMAIL_APP_PASSWORD=【設定済み】
-MAIL_TO=koushin1022apple@gmail.com,qsu3he-00001-flets@hdpeach.htdb.jp
+FB_PAGE_ACCESS_TOKEN=【Facebookページアクセストークン】
+FB_VERIFY_TOKEN=【Webhook検証用トークン（任意の文字列）】
+FB_APP_SECRET=【Facebookアプリシークレット】
+PORT=8080
+GMAIL_USER=【Gmail送信元アドレス】
+GMAIL_APP_PASSWORD=【Gmailアプリパスワード】
+MAIL_TO=koushin1022apple@gmail.com,qsu3he-00001-aga@hdpeach.htdb.jp
 ```
 
 ### 4.3 依存関係
@@ -134,10 +135,10 @@ MAIL_TO=koushin1022apple@gmail.com,qsu3he-00001-flets@hdpeach.htdb.jp
 ```json
 {
   "dependencies": {
-    "@line/bot-sdk": "^10.2.0",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
-    "nodemailer": "^6.9.14"
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^7.0.6"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
@@ -150,7 +151,7 @@ MAIL_TO=koushin1022apple@gmail.com,qsu3he-00001-flets@hdpeach.htdb.jp
 
 ## 5. セキュリティ
 
-1. LINE Webhookの署名検証
+1. Facebook Webhookの署名検証（SHA256 HMAC）
 2. 環境変数による機密情報の管理
 3. メール送信時のアプリパスワード使用
 
