@@ -1,0 +1,127 @@
+import "dotenv/config";
+import express from "express";
+import crypto from "crypto";
+
+// 設定
+const FB_PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN!;
+const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN!;
+const FB_APP_SECRET = process.env.FB_APP_SECRET!;
+
+// Expressサーバーの設定
+const app = express();
+app.use(express.json({ verify: verifyRequestSignature }));
+
+app.get("/", (_req, res) => res.send("Facebook Messenger Bot - Test Mode"));
+
+// Webhook検証エンドポイント（Facebook用）
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  console.log("=== Webhook検証リクエスト ===");
+  console.log("Mode:", mode);
+  console.log("Token:", token);
+  console.log("Challenge:", challenge);
+
+  if (mode === "subscribe" && token === FB_VERIFY_TOKEN) {
+    console.log("✓ Webhook検証成功");
+    res.status(200).send(challenge);
+  } else {
+    console.log("✗ Webhook検証失敗");
+    res.sendStatus(403);
+  }
+});
+
+// Webhookエンドポイント（メッセージ受信）
+app.post("/webhook", async (req, res) => {
+  console.log("\n=== Webhookイベント受信 ===");
+  console.log("受信時刻:", new Date().toISOString());
+  console.log("リクエストボディ:", JSON.stringify(req.body, null, 2));
+
+  const body = req.body;
+
+  if (body.object === "page") {
+    for (const entry of body.entry) {
+      console.log("\n--- Entry ---");
+      console.log("Entry ID:", entry.id);
+      console.log("Entry Time:", new Date(entry.time).toISOString());
+
+      const webhookEvent = entry.messaging?.[0];
+      if (webhookEvent) {
+        console.log("\n--- Messaging Event ---");
+        console.log("送信者ID:", webhookEvent.sender?.id);
+        console.log("受信者ID:", webhookEvent.recipient?.id);
+        console.log("タイムスタンプ:", new Date(webhookEvent.timestamp).toISOString());
+
+        // メッセージの場合
+        if (webhookEvent.message) {
+          console.log("\n--- メッセージ内容 ---");
+          console.log("メッセージID:", webhookEvent.message.mid);
+          console.log("テキスト:", webhookEvent.message.text);
+          console.log("添付ファイル:", webhookEvent.message.attachments);
+        }
+
+        // ポストバックの場合
+        if (webhookEvent.postback) {
+          console.log("\n--- ポストバック内容 ---");
+          console.log("Payload:", webhookEvent.postback.payload);
+          console.log("Title:", webhookEvent.postback.title);
+        }
+
+        // 配信確認の場合
+        if (webhookEvent.delivery) {
+          console.log("\n--- 配信確認 ---");
+          console.log("配信済みメッセージID:", webhookEvent.delivery.mids);
+        }
+
+        // 既読確認の場合
+        if (webhookEvent.read) {
+          console.log("\n--- 既読確認 ---");
+          console.log("既読ウォーターマーク:", webhookEvent.read.watermark);
+        }
+      }
+    }
+
+    console.log("\n=== 処理完了 ===\n");
+    res.status(200).send("EVENT_RECEIVED");
+  } else {
+    console.log("✗ ページイベントではありません");
+    res.sendStatus(404);
+  }
+});
+
+// リクエスト署名の検証
+function verifyRequestSignature(req: any, res: any, buf: Buffer) {
+  const signature = req.headers["x-hub-signature-256"];
+  
+  if (!signature) {
+    console.warn("⚠ 署名ヘッダーがありません");
+    return;
+  }
+
+  const elements = signature.split("=");
+  const signatureHash = elements[1];
+  const expectedHash = crypto
+    .createHmac("sha256", FB_APP_SECRET)
+    .update(buf)
+    .digest("hex");
+
+  if (signatureHash !== expectedHash) {
+    console.error("✗ リクエスト署名の検証に失敗しました");
+    console.error("受信した署名:", signatureHash);
+    console.error("期待される署名:", expectedHash);
+    throw new Error("リクエスト署名の検証に失敗しました");
+  }
+
+  console.log("✓ リクエスト署名の検証成功");
+}
+
+// サーバー起動
+const port = Number(process.env.PORT || 8080);
+app.listen(port, () => {
+  console.log("=================================");
+  console.log("Facebook Messenger Bot - Test Mode");
+  console.log(`Listening on http://localhost:${port}`);
+  console.log("=================================");
+});
